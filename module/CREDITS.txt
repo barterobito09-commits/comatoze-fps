@@ -1,0 +1,6 @@
+UltraPower - catatan kredit
+- Metode Disable Thermal (ctl.stop service dari file rc) dan Bypass Charging (node "health"): dari prompt pengguna.
+- Beberapa ide fitur game (preload aset, bersihkan RAM, bypass saat game, WiFi low latency, GPU gpufreqv2)
+  terinspirasi dari CMD-Tweaks oleh t.me/HoyoSlave. Kode ditulis ulang, bukan disalin.
+- Fast Charging (health "Good" + charge_control_limit 0): dari modul Fast Charging oleh t.me/HoyoSlave.
+- Disable Thermal (brutal: stop semua service, props, overlay file kosong): dari modul "Disable Thermal Helio g85,g99,g100 dan Dimensity 6080" oleh @HAPPYGAMES222. Kode ditulis ulang agar bisa dinyalakan/dimatikan dari WebUI.

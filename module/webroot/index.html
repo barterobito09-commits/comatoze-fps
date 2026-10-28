@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>UltraPower</title>
+<style>
+:root{--bg:#f4f5f8;--s1:#fff;--s2:#eef0f5;--ln:#e2e5ec;--tx:#15181e;--mu:#657084;--ac:#4f5bd5;--on:#fff;--dg:#d64545}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1014;--s1:#161a21;--s2:#1e232c;--ln:#272d38;--tx:#e9ecf1;--mu:#8b93a1;--ac:#8a97ff;--on:#0b0d12;--dg:#f0716f}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.4 system-ui,sans-serif;padding:calc(env(safe-area-inset-top,0px) + 16px) 14px calc(96px + env(safe-area-inset-bottom,0px))}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+.top h1{font-size:21px;margin:0;letter-spacing:-.3px}
+.top .sub{font-size:12px;color:var(--mu)}
+.ib{width:38px;height:38px;border-radius:12px;border:1px solid var(--ln);background:var(--s1);color:var(--tx);font-size:17px}
+.card{background:var(--s1);border:1px solid var(--ln);border-radius:16px;padding:14px;margin-bottom:12px}
+.ct{font-size:12px;font-weight:600;letter-spacing:.6px;text-transform:uppercase;color:var(--mu);margin:0 0 10px;display:flex;justify-content:space-between}
+.mu{color:var(--mu);font-size:12.5px}
+.seg{display:grid;gap:6px;background:var(--s2);padding:4px;border-radius:13px}
+.seg.c3{grid-template-columns:repeat(3,1fr)}
+.seg button{border:0;background:transparent;color:var(--mu);font-weight:600;font-size:13.5px;font-family:inherit;padding:10px 4px;border-radius:10px;transition:.15s}
+.seg button.on{background:var(--ac);color:var(--on);box-shadow:0 2px 8px rgba(0,0,0,.18)}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.tile{background:var(--s2);border-radius:12px;padding:10px 12px}
+.tile b{display:block;font-size:17px}
+.tile span{font-size:11.5px;color:var(--mu)}
+.fr{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--ln)}
+.fr:first-of-type{border-top:0;padding-top:2px}
+.fr b{font-weight:600}
+.fr .dg{color:var(--dg)}
+.sw{position:relative;width:46px;height:27px;flex:none}
+.sw input{opacity:0;position:absolute;inset:0;width:100%;height:100%;margin:0;z-index:1}
+.sw i{position:absolute;inset:0;background:var(--s2);border:1px solid var(--ln);border-radius:20px;transition:.2s}
+.sw i:after{content:"";position:absolute;top:3px;left:3px;width:19px;height:19px;border-radius:50%;background:var(--mu);transition:.2s}
+.sw input:checked+i{background:var(--ac);border-color:var(--ac)}
+.sw input:checked+i:after{transform:translateX(19px);background:var(--on)}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.g2 label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--mu)}
+.g2 .f{grid-column:1/-1}
+select{width:100%;font:inherit;font-size:14px;color:var(--tx);background:var(--s2);border:1px solid var(--ln);border-radius:10px;padding:10px}
+.btn{width:100%;margin-top:12px;border:0;border-radius:12px;padding:11px;font-weight:600;font-size:14px;font-family:inherit;background:var(--ac);color:var(--on)}
+.page{display:none}.page.on{display:block}
+nav{position:fixed;left:0;right:0;bottom:0;display:flex;justify-content:space-around;background:var(--s1);border-top:1px solid var(--ln);padding:8px 10px calc(8px + env(safe-area-inset-bottom,0px))}
+nav button{flex:1;border:0;background:transparent;color:var(--mu);font-weight:600;font-size:11px;font-family:inherit;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px}
+nav button.on{color:var(--ac)}
+nav svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+#fpsw{position:fixed;left:12px;top:70px;display:none;background:rgba(0,0,0,.72);color:#7cffb2;padding:3px 9px;border-radius:10px;font:700 16px ui-monospace,monospace;touch-action:none;z-index:9;line-height:1.1}#fpsw small{display:block;font-size:8px;opacity:.6;font-weight:400;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#toast{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:9px 16px;border-radius:20px;font-size:13px;opacity:0;transition:.25s;pointer-events:none;white-space:nowrap}
+#toast.show{opacity:.96}
+</style>
+</head>
+<body>
+<div class="top"><div><h1>UltraPower</h1><div class="sub" id="sub">Memuat…</div></div><button class="ib" onclick="load()">↻</button></div>
+<div id="p-home" class="page on"></div>
+<div id="p-cpu" class="page"></div>
+<div id="p-chg" class="page"></div>
+<div id="p-game" class="page"></div>
+<div id="p-feat" class="page"></div>
+<div id="fpsw"><span id="fpsv">0</span> <small id="fpsp"></small></div>
+<nav>
+ <button data-t="home" class="on"><svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>Beranda</button>
+ <button data-t="cpu"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg>CPU / GPU</button>
+ <button data-t="chg"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="15" height="10" rx="2"/><path d="M21 11v2M10 9l-2 3h4l-2 3"/></svg>Daya</button>
+ <button data-t="game"><svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="10" rx="5"/><path d="M7 10v4M5 12h4M16 11h.01M18 13h.01"/></svg>Game</button>
+ <button data-t="feat"><svg viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg>Fitur</button>
+</nav>
+<div id="toast"></div>
+
+<script>
+/* ===== Registry fitur on/off — tambah fitur baru di sini (+ backend: FEATS, feat(), fstate()) ===== */
+const FEATURES=[
+ {id:'nothermal',name:'Disable Thermal (Brutal)',desc:'Hentikan SEMUA service thermal, matikan thermal zone & limit GPU/PPM, trip suhu 125°C. Risiko panas berlebih/baterai. Reboot diperlukan agar aktif/nonaktif sepenuhnya.',danger:true},
+ {id:'wifilatency',name:'WiFi Low Latency',desc:'Mode performa & latensi rendah WiFi untuk game online.'},
+ {id:'dnd',name:"Don't Disturb",desc:'Nyalakan mode jangan ganggu sekarang.'},
+ {id:'fastcharge',group:'chg',name:'Fast Charging',desc:'Paksa status baterai "Good" & charge_control_limit 0 (metode modul Fast Charging) agar arus tidak diturunkan saat baterai hangat. Hasil tergantung charger & hardware.'},
+ {id:'autocut',group:'chg',name:'Auto Cut Charging',desc:'Berhenti mengisi di batas level yang dipilih.'},
+ {id:'bypass',group:'chg',name:'Bypass Charging',desc:'Nol-kan batas arus/tegangan input (metode node health). Nilai asli dipulihkan saat dimatikan.'},
+ {id:'fpsoverlay',group:'game',name:'FPS Overlay (aplikasi)',desc:'Angka FPS melayang di atas game, bisa digeser. Butuh APK UltraFPS.'},
+ {id:'gameprofile',group:'game',name:'Profil Otomatis Game',desc:'Masuk game: mode & Hz dari Profil Game. Keluar: kembali seperti semula.'},
+ {id:'gameclean',group:'game',name:'Bersihkan RAM saat Game',desc:'Matikan proses latar belakang aplikasi pihak ketiga saat game dibuka.'},
+ {id:'gamebypass',group:'game',name:'Bypass Charging saat Game',desc:'Jeda pengisian selama game berjalan (metode node health), lanjut setelah keluar.'},
+ {id:'preload',group:'game',name:'Auto Game Preload',desc:'Muat file game ke cache saat game dibuka.'},
+ {id:'gamednd',group:'game',name:'DND saat Game',desc:"Aktifkan Don't Disturb otomatis selama game berjalan."},
+ {id:'doze',name:'Doze Mode',desc:'Hemat baterai saat layar mati.'},
+ {id:'datasaver',name:'Data Saver',desc:'Batasi data latar belakang.'},
+ {id:'bootapply',name:'Terapkan saat boot',desc:'Matikan jika terjadi bootloop.'}
+];
+const MODES=[['perf','🚀','Performa'],['balance','⚖️','Balance'],['eco','🍃','Eco']];
+const MODE_DESC={perf:'Governor turbo / hino_turbo, frekuensi mentok tertinggi, refresh rate tertinggi.',balance:'Governor default, frekuensi bebas, 90 Hz (jika layar mendukung).',eco:'Frekuensi dibatasi ±60% dan refresh rate 60 Hz.',custom:'Pengaturan manual aktif.'};
+
+const BIN='sh /data/adb/modules/ultrapower/system/bin/ultrapower';
+const $=s=>document.querySelector(s);
+let tab='home',S=null,fpsOn=false,fpsT=null,INST=null;
+
+function exec(cmd){return new Promise(res=>{
+  if(typeof ksu==='undefined'){res({code:-1,out:''});return;}
+  const cb='cb_'+Date.now()+Math.floor(Math.random()*1e6);
+  window[cb]=(c,o)=>{delete window[cb];res({code:c,out:o||''});};
+  ksu.exec(cmd,'{}',cb);});}
+const run=a=>exec(BIN+' '+a+' </dev/null');
+function toast(t){const e=$('#toast');e.textContent=t;e.className='show';setTimeout(()=>e.className='',1700);}
+const list=s=>(s||'').trim().split(/\s+/).filter(Boolean);
+
+function parse(t){
+  const s={cpu:[],gpu:null,gpup:null,refresh:0,mode:'balance',feat:{}};
+  t.split('\n').forEach(l=>{const a=l.split('|');
+    if(a[0]==='MODE')s.mode=a[1];
+    else if(a[0]==='DEV')s.dev={brand:a[1],model:a[2],soc:a[3],kernel:a[4],android:a[5],gpu:a[6]};
+    else if(a[0]==='THERMRUN')s.thermrun=parseInt(a[1]);
+    else if(a[0]==='BAT')s.bat={lvl:a[1],st:a[2],cur:+a[3],temp:+a[4]},s.chgn=parseInt(a[6])||0,s.cut=parseInt(a[7])||80;
+    else if(a[0]==='FPSAPP')s.fpsapp=a[1]==='yes';
+    else if(a[0]==='PROF')s.prof=a[1]==='on';
+    else if(a[0]==='RATES')s.rates=list(a[1]).map(Number);
+    else if(a[0]==='GPCFG')s.gpcfg={mode:a[1]||'perf',hz:parseInt(a[2])||120};
+    else if(a[0]==='GAMES')s.games=list(a[1]);
+    else if(a[0]==='FEAT')s.feat[a[1]]=a[2]==='on';
+    else if(a[0]==='GPUP')s.gpup=list(a[1]).map(Number).sort((x,y)=>x-y);
+    else if(a[0]==='CPU'||a[0]==='GPU'){
+      const o={name:a[1],gov:a[2],min:a[3],max:a[4],cur:a[5],govs:list(a[6]),freqs:list(a[7]).map(Number).sort((x,y)=>x-y),cpus:a[8]||''};
+      a[0]==='CPU'?s.cpu.push(o):(s.gpu=o);}
+  });return s;}
+
+const RT=s=>{const a=(s.rates||[]).filter(r=>r===60||r===90||r===120);return a.length?a:[60,90,120];};
+const mhz=(v,d)=>v?Math.round(v/d)+' MHz':'-';
+const opts=(arr,sel,fmt)=>arr.map(v=>`<option value="${v}" ${String(v)===String(sel)?'selected':''}>${fmt?fmt(v):v}</option>`).join('');
+
+function pageHome(s){
+  return `<div class="card"><p class="ct">Mode</p>
+   <div class="seg c3">${MODES.map(([k,i,n])=>`<button class="${s.mode===k?'on':''}" onclick="setMode('${k}')">${i} ${n}</button>`).join('')}</div>
+   <p class="mu" style="margin:10px 2px 0">${MODE_DESC[s.mode]||''}${s.prof?' · Sedang di game: Profil Game aktif':''}</p></div>
+  <div class="card"><p class="ct">Cara Kerja</p><div class="mu" style="line-height:1.6">Refresh rate mengikuti mode: Eco 60 Hz, Balance 90 Hz, Performa 120 Hz (menyesuaikan yang didukung layar). Di game, tab Game › Profil Game bisa memakai mode dan Hz pilihanmu sendiri.</div></div>`;
+}
+function proc(kind,o,div,title){
+  const id=kind+'_'+(kind==='gpu'?'x':o.name),f=v=>mhz(v,div);
+  return `<div class="card"><p class="ct"><span>${title}</span><span>${f(o.cur)}</span></p>
+   <div class="g2">
+    <label class="f">Governor<select id="${id}_g">${opts(o.govs,o.gov)}</select></label>
+    <label>Min<select id="${id}_mn">${opts(o.freqs,o.min,f)}</select></label>
+    <label>Max<select id="${id}_mx">${opts(o.freqs,o.max,f)}</select></label>
+   </div><button class="btn" onclick="applyOne('${kind}','${o.name}')">Terapkan</button></div>`;
+}
+function pageCpu(s){
+  let h=s.cpu.map(c=>proc('cpu',c,1000,'CPU '+c.name+' (cpu '+c.cpus+')')).join('');
+  if(s.gpup) h+=`<div class="card"><p class="ct">GPU (gpufreq)</p><label class="mu">Kunci frekuensi
+    <select id="gpup_f" style="margin-top:4px"><option value="0">Auto (lepas kunci)</option>${opts(s.gpup,'',v=>Math.round(v/1000)+' MHz')}</select></label>
+    <button class="btn" onclick="applyGpuP()">Terapkan</button></div>`;
+  else h+=s.gpu?proc('gpu',s.gpu,1e6,'GPU'):'<div class="card mu">GPU tidak terdeteksi.</div>';
+  return h;
+}
+const row=f=>`<div class="fr"><div><b class="${f.danger?'dg':''}">${f.name}</b><div class="mu">${f.desc}${f.id==='nothermal'&&S.thermrun!=null?' · Service thermal berjalan: '+S.thermrun:''}${f.id==='fpsoverlay'?' · Aplikasi: '+(S.fpsapp?'terpasang':'belum'):''}</div></div>
+ <label class="sw"><input type="checkbox" ${S.feat[f.id]?'checked':''} onchange="setFeat('${f.id}',this.checked)"><i></i></label></div>`;
+const rows=g=>FEATURES.filter(f=>(f.group||'sys')===g).map(row).join('');
+function pageInfo(s){const d=s.dev||{};
+ return `<div class="card"><p class="ct">Info Perangkat</p>
+  <div class="mu" style="line-height:1.7">${d.brand||''} ${d.model||''}<br>SoC: ${d.soc||'-'} · GPU: ${d.gpu||'-'}<br>Android ${d.android||'-'} · Kernel ${d.kernel||'-'}</div>
+  <button class="btn" onclick="probe()">Buat Laporan Perangkat</button>
+  <pre id="rep" class="mu" style="white-space:pre-wrap;word-break:break-all;max-height:260px;overflow:auto;margin:10px 0 0;font-size:11px"></pre>
+  <button class="btn" style="background:var(--s2);color:var(--tx)" onclick="copyRep()">Salin Laporan</button></div>`;}
+function pageFeat(s){return `<div class="card"><p class="ct">Fitur</p>${rows('sys')}</div>`+pageInfo(s);}
+function pageChg(s){const b=s.bat||{},cut=s.cut||80;
+ return `<div class="card"><p class="ct">Baterai</p><div class="tiles">
+  <div class="tile"><b>${b.lvl||'-'}%</b><span>${b.st||'-'}</span></div>
+  <div class="tile"><b>${b.cur?Math.round(Math.abs(b.cur)/1000)+' mA':'-'}</b><span>Arus · ${b.temp?(b.temp/10).toFixed(1)+'°C':'-'}</span></div></div></div>
+ <div class="card"><p class="ct">Pengisian</p>${rows('chg')}
+  <div style="padding-top:12px;border-top:1px solid var(--ln)"><b>Batas Auto Cut: <span id="cutv">${cut}</span>%</b>
+  <input type="range" min="50" max="99" value="${cut}" style="width:100%;margin-top:8px" oninput="$('#cutv').textContent=this.value" onchange="setCut(this.value)">
+  <div class="mu">Berhenti mengisi di batas ini, lanjut lagi saat turun 5%.</div></div></div>
+ <div class="card"><p class="ct">Node Charging</p><div class="mu">${s.chgn?s.chgn+' node limit ditemukan.':'Tidak ada node ditemukan: Bypass & Auto Cut tidak akan bekerja di perangkat ini.'}</div></div>`;}
+function pageGame(s){return `<div class="card"><p class="ct">Game</p>${rows('game')}<button class="btn" onclick="instApp()">Pasang / Pasang Ulang UltraFPS</button></div>
+ ${gpCard(s)}<div class="card"><p class="ct">Daftar Game</p><select id="gsel"><option value="">Memuat…</option></select>
+  <button class="btn" onclick="addGame()">Tambah ke Daftar</button>
+  <div style="margin-top:8px">${(s.games||[]).map(p=>`<div class="fr"><span class="mu" style="word-break:break-all">${p}</span><button class="ib" onclick="delGame('${p}')">✕</button></div>`).join('')||'<div class="mu">Belum ada game.</div>'}</div></div>
+ <div class="card"><div class="fr" style="border:0;padding:0"><div><b>Tampilkan FPS</b><div class="mu">Chip kecil yang bisa digeser. Tampil selama WebUI terbuka.</div></div>
+  <label class="sw"><input type="checkbox" ${fpsOn?'checked':''} onchange="toggleFps(this.checked)"><i></i></label></div></div>`;}
+
+function render(){
+  if(!S)return;
+  $('#p-home').innerHTML=pageHome(S);$('#p-cpu').innerHTML=pageCpu(S);$('#p-feat').innerHTML=pageFeat(S);$('#p-chg').innerHTML=pageChg(S);$('#p-game').innerHTML=pageGame(S);fillGames();
+  $('#sub').textContent=(S.dev?S.dev.model+' · '+S.dev.soc+' · ':'')+'Mode: '+({perf:'Performa',balance:'Balance',eco:'Eco',custom:'Manual'}[S.mode]||S.mode);
+}
+function showTab(t){tab=t;
+  document.querySelectorAll('.page').forEach(e=>e.classList.toggle('on',e.id==='p-'+t));
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>showTab(b.dataset.t));
+
+async function load(){
+  const r=await run('status');
+  if(!r.out){$('#sub').textContent='Backend tidak terbaca';$('#p-home').innerHTML='<div class="card" style="color:var(--dg)">Buka lewat WebUI KernelSU / APatch / MMRL dan pastikan modul aktif.</div>';return;}
+  S=parse(r.out);render();
+}
+async function setMode(m){toast('Menerapkan…');await run('mode '+m);await load();toast('Mode '+m);}
+async function setFeat(id,on){await run(`feat ${id} ${on?'on':'off'}`);await load();toast((on?'Aktif: ':'Nonaktif: ')+(FEATURES.find(f=>f.id===id)||{}).name+(id==='nothermal'?' · reboot untuk efek penuh':''));}
+async function probe(){toast('Membuat laporan…');const r=await run('probe');$('#rep').textContent=r.out;toast('Tersimpan: /sdcard/UltraPower-probe.txt');}
+function copyRep(){const t=$('#rep').textContent;if(!t){toast('Buat laporan dulu');return;}
+  (navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(()=>toast('Disalin'),()=>toast('Ambil dari /sdcard/UltraPower-probe.txt'));}
+async function setCut(v){await run('cut '+v);toast('Batas '+v+'%');}
+async function fillGames(){const el=$('#gsel');if(!el)return;if(!INST){const r=await run('games list');INST=list(r.out);}
+  el.innerHTML=INST.filter(p=>!(S.games||[]).includes(p)).map(p=>`<option>${p}</option>`).join('');}
+async function addGame(){const v=$('#gsel').value;if(!v)return;await run('games add '+v);await load();toast('Ditambahkan');}
+async function delGame(p){await run('games del '+p);await load();}
+function toggleFps(on){fpsOn=on;$('#fpsw').style.display=on?'block':'none';clearInterval(fpsT);if(on){tickFps();fpsT=setInterval(tickFps,2000);}}
+async function tickFps(){const a=(await run('fps')).out.trim().split('|');$('#fpsv').textContent=a[1]||'0';$('#fpsp').textContent=(a[2]||'').split('.').pop();}
+(function(){const w=$('#fpsw');let sx,sy,ox,oy,d=0;
+ try{const p=JSON.parse(localStorage.getItem('fpspos')||'null');if(p){w.style.left=p.x+'px';w.style.top=p.y+'px';}}catch(e){}
+ w.addEventListener('pointerdown',e=>{d=1;sx=e.clientX;sy=e.clientY;ox=w.offsetLeft;oy=w.offsetTop;w.setPointerCapture(e.pointerId);});
+ w.addEventListener('pointermove',e=>{if(!d)return;w.style.left=Math.max(0,ox+e.clientX-sx)+'px';w.style.top=Math.max(0,oy+e.clientY-sy)+'px';});
+ w.addEventListener('pointerup',()=>{d=0;try{localStorage.setItem('fpspos',JSON.stringify({x:w.offsetLeft,y:w.offsetTop}));}catch(e){}});})();
+async function instApp(){toast('Memasang…');const r=await run('fpsapp install force');await load();toast(r.out.indexOf('OK')>=0?'UltraFPS terpasang':'Gagal: '+(r.out.split('|')[1]||'cek APK').trim());}
+function gpCard(s){const g=s.gpcfg||{mode:'perf',hz:120};
+ return `<div class="card"><p class="ct">Profil Game</p><div class="g2">
+  <label>Mode<select onchange="gpCfg('mode',this.value)">${[['perf','Performa'],['balance','Balance'],['eco','Eco']].map(([k,n])=>`<option value="${k}" ${g.mode===k?'selected':''}>${n}</option>`).join('')}</select></label>
+  <label>Refresh Rate<select onchange="gpCfg('hz',this.value)">${RT(s).map(v=>`<option value="${v}" ${g.hz==v?'selected':''}>${v} Hz</option>`).join('')}</select></label></div>
+  <div class="mu" style="margin-top:8px">Dipakai saat game dari daftar berjalan (aktifkan "Profil Otomatis Game"). Keluar game: kembali ke mode sebelumnya.</div></div>`;}
+async function gpCfg(k,v){await run(`gp_cfg ${k} ${v}`);toast('Disimpan');}
+async function applyGpuP(){await run('gpu_fix '+$('#gpup_f').value);await load();toast('GPU diterapkan');}
+async function applyOne(kind,name){
+  const id=kind+'_'+(kind==='gpu'?'x':name),g=$('#'+id+'_g').value,mn=+$('#'+id+'_mn').value,mx=+$('#'+id+'_mx').value;
+  if(mn>mx){toast('Min tidak boleh > Max');return;}
+  if(kind==='cpu'){await run(`cpu_gov ${name} ${g}`);await run(`cpu_freq ${name} ${mn} ${mx}`);}
+  else{await run(`gpu_gov ${g}`);await run(`gpu_freq ${mn} ${mx}`);}
+  await load();toast('Diterapkan');
+}
+load();
+</script>
+</body>
+</html>

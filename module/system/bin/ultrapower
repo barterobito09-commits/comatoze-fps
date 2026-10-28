@@ -1,0 +1,550 @@
+#!/system/bin/sh
+# UltraPower core backend. Tambah fitur baru = tambah fungsi + case di bagian bawah.
+exec </dev/null
+SELF=/data/adb/modules/ultrapower/system/bin/ultrapower
+MODD=/data/adb/modules/ultrapower
+FPKG=com.ultrapower.fps
+DIR=/data/adb/ultrapower
+CFG=$DIR/config
+CUS=$DIR/custom
+CPU=/sys/devices/system/cpu/cpufreq
+mkdir -p $DIR
+[ -f $CFG ] || printf 'MODE=balance\nTHERMAL=on\n' > $CFG
+[ -f $CUS ] || : > $CUS
+
+w(){ [ -e "$2" ] && { chmod 644 "$2" 2>/dev/null; echo "$1" > "$2" 2>/dev/null; }; }
+rd(){ cat "$1" 2>/dev/null; }
+getcfg(){ grep "^$1=" $CFG | cut -d= -f2; }
+setcfg(){ grep -v "^$1=" $CFG > $CFG.t; echo "$1=$2" >> $CFG.t; mv $CFG.t $CFG; }
+setcustom(){ grep -v "^$1|" $CUS > $CUS.t 2>/dev/null; echo "$1|$2" >> $CUS.t; mv $CUS.t $CUS; }
+markcustom(){ [ -z "$NOSAVE" ] && { setcfg MODE custom; setcustom "$1" "$2"; }; }
+
+pick(){ av="$1"; shift; for g in "$@"; do case " $av " in *" $g "*) echo $g; return;; esac; done; }
+maxof(){ echo $* | tr ' ' '\n' | grep -v '^$' | sort -n | tail -1; }
+minof(){ echo $* | tr ' ' '\n' | grep -v '^$' | sort -n | head -1; }
+cap(){ t=$1; shift; best=""; for f in $*; do
+  if [ "$f" -le "$t" ]; then if [ -z "$best" ] || [ "$f" -gt "$best" ]; then best=$f; fi; fi; done; echo ${best:-$t}; }
+range(){ w $4 $2; w $3 $1; w $4 $2; }   # minfile maxfile min max
+
+# ---------- GPU detect ----------
+GPU=""
+for d in /sys/class/kgsl/kgsl-3d0/devfreq; do [ -d $d ] && GPU=$d; done
+if [ -z "$GPU" ]; then
+  for d in /sys/class/devfreq/*; do
+    case "$(basename $d)" in *gpu*|*mali*|*kgsl*|*g3d*) GPU=$d; break;; esac
+  done
+fi
+
+# ---------- MODE ----------
+cpu_mode(){
+  for p in $CPU/policy*; do
+    [ -d $p ] || continue
+    av=$(rd $p/scaling_available_governors); fr=$(rd $p/scaling_available_frequencies)
+    imax=$(rd $p/cpuinfo_max_freq); imin=$(rd $p/cpuinfo_min_freq)
+    [ -z "$fr" ] && fr="$imin $imax"
+    case $1 in
+      perf) g=$(pick "$av" turbo performance schedutil walt); mx=$imax; mn=$imax;;
+      eco)  g=$(pick "$av" schedutil walt interactive powersave); mx=$(cap $((imax*60/100)) $fr); mn=$imin;;
+      *)    g=$(pick "$av" schedutil walt interactive ondemand); mx=$imax; mn=$imin;;
+    esac
+    [ -n "$g" ] && w $g $p/scaling_governor
+    range $p/scaling_min_freq $p/scaling_max_freq $mn $mx
+  done
+}
+GP=/proc/gpufreq
+gp_freqs(){ [ -f $GP/gpufreq_opp_dump ] && grep -o 'freq = *[0-9]*' $GP/gpufreq_opp_dump | grep -o '[0-9]*$'; }
+gpu_fix(){ [ -f $GP/gpufreq_opp_freq ] && echo $1 > $GP/gpufreq_opp_freq; markcustom gpu_fix "gpu_fix $1"; }
+gpu_mode(){
+  V2=/proc/gpufreqv2/fix_target_opp_index
+  [ -f $V2 ] && { if [ "$1" = perf ]; then echo 0 > $V2; else echo -1 > $V2; fi; }
+  if [ -z "$GPU" ]; then
+    [ -f $GP/gpufreq_opp_freq ] || return
+    if [ "$1" = "perf" ]; then echo $(maxof $(gp_freqs)) > $GP/gpufreq_opp_freq; else echo 0 > $GP/gpufreq_opp_freq; fi
+    return
+  fi
+  av=$(rd $GPU/available_governors); fr=$(rd $GPU/available_frequencies)
+  [ -z "$fr" ] && return
+  top=$(maxof $fr); low=$(minof $fr)
+  case $1 in
+    perf) g=$(pick "$av" hino_turbo turbo performance msm-adreno-tz); mn=$top; mx=$top;;
+    eco)  g=$(pick "$av" msm-adreno-tz simple_ondemand mali_ondemand); mn=$low; mx=$(cap $((top*60/100)) $fr);;
+    *)    g=$(pick "$av" msm-adreno-tz simple_ondemand mali_ondemand); mn=$low; mx=$top;;
+  esac
+  [ -n "$g" ] && w $g $GPU/governor
+  range $GPU/min_freq $GPU/max_freq $mn $mx
+}
+set_mode(){
+  cpu_mode $1; gpu_mode $1
+  hz=$(mode_hz $1); [ -n "$hz" ] && refresh $hz >/dev/null
+  [ "$2" = temp ] || { setcfg MODE $1; : > $CUS; }
+}
+
+
+# ---------- THERMAL ----------
+# Metode "brutal" (dari modul Disable Thermal Helio G85/G99/G100 & Dimensity 6080): hentikan SEMUA service thermal,
+# bekukan prosesnya, matikan thermal zone, lepas limit GPU/PPM/CPU, naikkan trip suhu, sembunyikan node sysfs thermal.
+# Perubahan runtime disimpan dulu di $TS.* sehingga "thermal on" bisa mengembalikannya.
+# Bagian boot-time (props ro.* + file overlay kosong) diatur oleh post-fs-data.sh dan baru berubah setelah REBOOT.
+TS=$DIR/ths
+THSVC="thermal_core thermal_manager vendor.thermal-hal-2-0.mtk mi_thermald vendor.thermal-engine vendor.thermal-manager
+ vendor.thermal-hal-2-0 vendor.thermal-symlinks vendor.thermal.symlinks thermal_mnt_hal_service vendor.thermal-hal thermal
+ thermald thermalloadalgod thermalservice sec-thermal-1-0 debug_pid.sec-thermal-1-0 thermal-engine vendor.thermal-hal-1-0
+ android.thermal-hal vendor-thermal-1-0 thermal-hal"
+THBIN="android.hardware.thermal-service.mediatek android.hardware.thermal@2.0-service.mtk"
+thermal_svcs(){ find /*/etc/init -type f 2>/dev/null | xargs grep -Eh '^service.*thermal|^service +miui' 2>/dev/null | awk '{print $2}'; }
+# sw <nilai> <node>: tulis ke node, simpan nilai asli (sekali) untuk dipulihkan
+sw(){ [ -e "$2" ] || return 0; grep -q "^$2|" $TS.vals 2>/dev/null || echo "$2|$(cat "$2" 2>/dev/null)" >> $TS.vals; w "$1" "$2"; }
+# rp <prop> <nilai>: set properti (resetprop), simpan nilai asli (sekali)
+rp(){ grep -q "^$1|" $TS.props 2>/dev/null || echo "$1|$(getprop $1)" >> $TS.props; resetprop -n $1 "$2" 2>/dev/null || setprop $1 "$2" 2>/dev/null; }
+th_pids(){ pgrep thermal 2>/dev/null; pidof $THBIN 2>/dev/null | tr ' ' '\n'; }
+th_stop_all(){
+  for a in $(thermal_svcs) $THSVC; do stop $a 2>/dev/null; done
+  for pid in $(th_pids); do [ -n "$pid" ] && echo $pid >> $TS.pids && kill -STOP $pid 2>/dev/null; done
+}
+th_off(){
+  mkdir -p $DIR
+  # catat service yang sedang berjalan (sekali) agar bisa distart lagi
+  [ -f $TS.svc ] || { : > $TS.svc; for a in $(thermal_svcs); do [ "$(getprop init.svc.$a)" = running ] && echo $a >> $TS.svc; done; }
+  # ulangi sampai tidak ada service thermal yang masih berjalan (maks 5x) — pengganti loop yang rusak di modul asli
+  i=0; while [ $i -lt 5 ]; do
+    th_stop_all
+    left=0; for a in $(thermal_svcs); do [ "$(getprop init.svc.$a)" = running ] && left=1; done
+    [ $left = 0 ] && break; i=$((i+1)); sleep 1
+  done
+  # status service dipalsukan jadi "stopped", properti init.svc_* dikosongkan
+  for a in $(getprop | grep thermal | cut -f1 -d] | cut -f2 -d[ | grep -F init.svc.); do rp $a stopped; done
+  for a in $(getprop | grep 'init\.svc_' | cut -f1 -d] | cut -f2 -d[); do rp $a ""; done
+  for a in $(getprop | grep 'thermal.*running' | cut -f1 -d] | cut -f2 -d[); do rp $a freezed; done
+  for kv in dalvik.vm.dexopt.thermal-cutoff=0 sys.thermal.enable=false ro.thermal_warmreset=false debug.thermal.throttle.support=no; do rp ${kv%%=*} ${kv#*=}; done
+  # thermal zone
+  for z in /sys/class/thermal/thermal_zone*; do sw disabled $z/mode; sw step_wise $z/policy; done
+  # limit GPU (MTK)
+  if [ -f /proc/gpufreq/gpufreq_power_limited ]; then
+    for s in ignore_batt_oc ignore_batt_percent ignore_low_batt ignore_thermal_protect ignore_pbm_limited; do echo "$s 1" > /proc/gpufreq/gpufreq_power_limited 2>/dev/null; done
+    : > $TS.gpu
+  fi
+  # limit CPU dari thermal_message (Xiaomi/Transsion): set ke frekuensi maksimum
+  if [ -f /sys/devices/virtual/thermal/thermal_message/cpu_limits ]; then
+    for c in 0 2 4 6 7; do mf=$(rd /sys/devices/system/cpu/cpu$c/cpufreq/cpuinfo_max_freq)
+      [ -n "$mf" ] && [ "$mf" -gt 0 ] && echo "cpu$c $mf" > /sys/devices/virtual/thermal/thermal_message/cpu_limits 2>/dev/null; done
+  fi
+  # PPM (Power Policy Manager): matikan policy yang membatasi
+  if [ -f /proc/ppm/policy_status ]; then
+    [ -f $TS.ppm ] || grep -E 'FORCE_LIMIT|PWR_THRO|THERMAL' /proc/ppm/policy_status | awk -F'[][]' '{print $2}' > $TS.ppm
+    for i in $(cat $TS.ppm); do echo "$i 0" > /proc/ppm/policy_status 2>/dev/null; done
+  fi
+  # trip suhu legacy MTK -> 125C tanpa cooler (berlaku sampai reboot)
+  if [ -f /proc/driver/thermal/tzcpu ]; then
+    for tz in tzcpu tzpmic tzbattery tzpa tzcharger tzwmt tzbts tzbtsnrpa tzbtspa; do
+      [ -f /proc/driver/thermal/$tz ] && echo "1 125000 0 mtktscpu-sysrst 0 0 no-cooler 200" > /proc/driver/thermal/$tz 2>/dev/null
+    done
+  fi
+  # Qualcomm msm_thermal / kgsl
+  sw 0 /sys/kernel/msm_thermal/enabled; sw 0 /sys/class/kgsl/kgsl-3d0/throttling
+  sw N /sys/module/msm_thermal/parameters/enabled; sw 0 /sys/module/msm_thermal/core_control/enabled; sw 0 /sys/module/msm_thermal/vdd_restriction/enabled
+  # proteksi arus baterai MTK + parameter workqueue (sesuai modul asli)
+  [ -f /proc/mtk_batoc_throttling/battery_oc_protect_stop ] && echo "stop 1" > /proc/mtk_batoc_throttling/battery_oc_protect_stop 2>/dev/null
+  sw N /sys/module/workqueue/parameters/power_efficient; sw N /sys/module/workqueue/parameters/disable_numa
+  # semua node bernama *throttling* -> 0 (satu arah, kembali normal setelah reboot)
+  find /sys -type f -name '*throttling*' 2>/dev/null | while IFS= read -r f; do [ -w "$f" ] && echo 0 > "$f" 2>/dev/null; done
+  cmd thermalservice override-status 0 >/dev/null 2>&1
+  # terakhir: sembunyikan node thermal (izin asli disimpan)
+  [ -f $TS.perm ] || find /sys/devices/virtual/thermal -type f -exec stat -c '%a %n' {} + 2>/dev/null > $TS.perm
+  find /sys/devices/virtual/thermal -type f -exec chmod 000 {} + 2>/dev/null
+}
+th_on(){
+  for pid in $(cat $TS.pids 2>/dev/null) $(pgrep thermal 2>/dev/null); do kill -CONT $pid 2>/dev/null; done
+  if [ -f $TS.perm ]; then while read -r m f; do [ -n "$f" ] && chmod $m "$f" 2>/dev/null; done < $TS.perm; fi
+  if [ -f $TS.props ]; then while IFS='|' read -r p v; do
+    if [ -n "$v" ]; then resetprop -n $p "$v" 2>/dev/null; else resetprop --delete $p 2>/dev/null; fi
+  done < $TS.props; fi
+  if [ -f $TS.vals ]; then while IFS='|' read -r f v; do [ -n "$v" ] && w "$v" "$f"; done < $TS.vals; fi
+  [ -f $TS.gpu ] && for s in ignore_batt_oc ignore_batt_percent ignore_low_batt ignore_thermal_protect ignore_pbm_limited; do echo "$s 0" > /proc/gpufreq/gpufreq_power_limited 2>/dev/null; done
+  if [ -f $TS.ppm ]; then for i in $(cat $TS.ppm); do echo "$i 1" > /proc/ppm/policy_status 2>/dev/null; done; fi
+  cmd thermalservice reset >/dev/null 2>&1
+  if [ -s $TS.svc ]; then for a in $(cat $TS.svc); do start $a 2>/dev/null; done
+  else for a in $(thermal_svcs); do start $a 2>/dev/null; done; fi
+  rm -f $TS.*
+}
+thermal(){ # off|on [temp]  (temp = tanpa mengubah konfigurasi tersimpan)
+  if [ "$1" = off ]; then
+    th_off
+    [ "$2" = temp ] || setcfg THERMAL off
+  else
+    th_on
+    [ "$2" = temp ] || setcfg THERMAL on
+    # props ro.* & file overlay baru kembali normal setelah reboot (diatur post-fs-data.sh)
+    echo "NOTE|reboot untuk mengembalikan sepenuhnya"
+  fi
+}
+
+# ---------- SETTINGS HELPER (fallback ke content provider bila `settings` gagal) ----------
+sput(){ # ns key value
+  o=$(settings put $1 $2 $3 2>&1)
+  case "$o" in *Failure*|*cmd:*|*xception*) content insert --uri content://settings/$1 --bind name:s:$2 --bind value:s:$3 >/dev/null 2>&1;; esac
+}
+sget(){ # ns key
+  v=$(settings get $1 $2 2>&1)
+  case "$v" in *Failure*|*cmd:*|*xception*|null) v=$(content query --uri content://settings/$1 --where "name='$2'" 2>/dev/null | sed -n 's/.*value=\([^,]*\).*/\1/p');; esac
+  echo "$v"
+}
+
+# ---------- REFRESH RATE ----------
+rates(){ dumpsys display 2>/dev/null | grep -o 'fps=[0-9.]*' | cut -d= -f2 | awk '{print int($1+0.5)}' | sort -un | tr '\n' ' ' | sed 's/ $//'; }
+rlist(){ r=$(rates | tr ' ' '\n' | awk '$1>=60'); [ -n "$r" ] || r="60 90 120"; echo $r | tr ' ' '\n' | sort -n; }
+mode_hz(){ # Hz untuk tiap mode: perf=tertinggi, balance=90 (bila ada, jika tidak terendah), eco=terendah (>=60)
+  case $1 in
+    perf) rlist | tail -1;;
+    eco) rlist | head -1;;
+    balance) if rlist | grep -qx 90; then echo 90; else rlist | head -1; fi;;
+  esac
+}
+refresh(){ # Hz
+  case $1 in ''|*[!0-9]*) echo "ERR|nilai tidak valid"; return 1;; esac
+  rt=$(rates)
+  if [ -n "$rt" ]; then case " $rt " in *" $1 "*) ;; *) echo "ERR|$1 Hz tidak didukung layar (tersedia: $rt)"; return 1;; esac; fi
+  sput system min_refresh_rate $1.0; sput system peak_refresh_rate $1.0
+  m=$(dumpsys display 2>/dev/null | grep -o "width=[0-9]*, height=[0-9]*, fps=$1\.[0-9]*" | head -1)
+  if [ -n "$m" ]; then dw=${m#width=}; dw=${dw%%,*}; dh=${m#*height=}; dh=${dh%%,*}; cmd display set-user-preferred-display-mode $dw $dh $1 >/dev/null 2>&1; fi
+  echo "OK|$(sget system peak_refresh_rate)"
+}
+
+# ---------- FEATURE TOGGLES ----------
+# Tambah fitur baru: 1) nama di FEATS  2) case di feat()  3) default di fstate()  4) entri di FEATURES (index.html)
+FEATS="nothermal doze datasaver wifilatency bootapply dnd fastcharge autocut bypass gamebypass preload gamednd gameprofile gameclean fpsoverlay"
+feat(){ # name on|off
+  case $1 in
+    nothermal) if [ "$2" = on ]; then thermal off; else thermal on; fi; return;;
+    dnd) if [ "$2" = on ]; then cmd notification set_dnd priority; else cmd notification set_dnd off; fi; return;;
+    gamebypass) setcfg "F_$1" $2; chg_sync; game_sync; return;;
+    gameprofile|gameclean) setcfg "F_$1" $2; game_sync; return;;
+    wifilatency) if [ "$2" = on ]; then wm=enabled; else wm=disabled; fi; cmd wifi force-hi-perf-mode $wm >/dev/null 2>&1; cmd wifi force-low-latency-mode $wm >/dev/null 2>&1;;
+    fastcharge|autocut|bypass) setcfg "F_$1" $2; chg_sync; return;;
+    fpsoverlay) setcfg "F_$1" $2; fps_sync; return;;
+    preload|gamednd) setcfg "F_$1" $2; game_sync; return;;
+    doze) [ "$2" = on ] && dumpsys deviceidle enable all >/dev/null 2>&1 || dumpsys deviceidle disable all >/dev/null 2>&1;;
+    datasaver) [ "$2" = on ] && cmd netpolicy set restrict-background true || cmd netpolicy set restrict-background false;;
+    bootapply) [ "$2" = on ] && rm -f $DIR/skip || touch $DIR/skip; return;;
+    *) return;;
+  esac
+  setcfg "F_$1" $2
+}
+fstate(){
+  case $1 in
+    nothermal) [ "$(getcfg THERMAL)" = off ] && echo on || echo off;;
+    dnd) case "$(sget global zen_mode)" in 0|null|"") echo off;; *) echo on;; esac;;
+    bootapply) [ -f $DIR/skip ] && echo off || echo on;;
+    doze) v=$(getcfg F_doze); echo ${v:-on};;
+    *) v=$(getcfg F_$1); echo ${v:-off};;
+  esac
+}
+
+# ---------- DEVICE INFO / PROBE ----------
+soc(){ s=$(getprop ro.soc.model); [ -z "$s" ] && s=$(getprop ro.board.platform); [ -z "$s" ] && s=$(getprop ro.hardware); echo $s; }
+gpu_type(){
+  if [ -d /sys/class/kgsl/kgsl-3d0 ]; then echo adreno
+  elif [ -n "$GPU" ]; then echo devfreq
+  elif [ -f $GP/gpufreq_opp_freq ]; then echo mtk-gpufreq
+  else echo none; fi
+}
+caps(){
+  [ -d $CPU ] && c=yes || c=no; echo "CAP|cpufreq|$c"
+  [ "$(gpu_type)" != none ] && c=yes || c=no; echo "CAP|gpu|$c"
+  ls /sys/class/thermal/thermal_zone*/mode >/dev/null 2>&1 && c=yes || c=no; echo "CAP|thermal|$c"
+}
+probe(){
+  OUT=$DIR/probe.txt
+  {
+  echo "== DEVICE =="
+  for k in ro.product.brand ro.product.model ro.product.device ro.hardware ro.board.platform ro.soc.manufacturer ro.soc.model ro.build.version.release ro.build.version.sdk ro.build.fingerprint; do echo "$k=$(getprop $k)"; done
+  echo "kernel=$(uname -r)"
+  echo "== CPU =="
+  for p in $CPU/policy*; do [ -d $p ] || continue
+    echo "$(basename $p) cpus=$(rd $p/related_cpus) gov=$(rd $p/scaling_governor)"
+    echo "  governors: $(rd $p/scaling_available_governors)"
+    echo "  freqs: $(rd $p/scaling_available_frequencies)"
+  done
+  echo "== GPU =="
+  echo "type=$(gpu_type) path=$GPU"
+  [ -n "$GPU" ] && { echo "governors: $(rd $GPU/available_governors)"; echo "freqs: $(rd $GPU/available_frequencies)"; }
+  echo "devfreq: $(ls /sys/class/devfreq 2>/dev/null | tr '\n' ' ')"
+  echo "kgsl: $(ls /sys/class/kgsl 2>/dev/null | tr '\n' ' ')"
+  echo "proc gpufreq: $(ls /proc/gpufreq 2>/dev/null | tr '\n' ' ')"
+  echo "proc gpufreqv2: $(ls /proc/gpufreqv2 2>/dev/null | tr '\n' ' ')"
+  echo "== THERMAL =="
+  echo "zones: $(ls -d /sys/class/thermal/thermal_zone* 2>/dev/null | wc -l)"
+  getprop | grep 'init.svc.*thermal'
+  echo "== DISPLAY =="
+  echo "peak_refresh_rate=$(sget system peak_refresh_rate) min=$(sget system min_refresh_rate)"
+  echo "display modes: $(dumpsys display 2>/dev/null | grep -o 'width=[0-9]*, height=[0-9]*, fps=[0-9.]*' | sort -u | tr '\n' ';')"
+  echo "user preferred: $(cmd display get-user-preferred-display-mode 2>&1 | head -2 | tr '\n' ' ')"
+  echo "refresh keys: $(content query --uri content://settings/system 2>/dev/null | grep -io 'name=[a-z_]*refresh[a-z_]*, value=[^,]*' | tr '\n' ';')"
+  echo "== POWER SUPPLY =="
+  ls /sys/class/power_supply 2>/dev/null | tr '\n' ' '; echo
+  echo "== IO / MEM =="
+  for b in /sys/block/sda /sys/block/mmcblk0; do [ -f $b/queue/scheduler ] && echo "$(basename $b): $(cat $b/queue/scheduler)"; done
+  echo "zram: $(rd /sys/block/zram0/disksize) swappiness=$(rd /proc/sys/vm/swappiness)"
+  } > $OUT 2>&1
+  cp $OUT /sdcard/UltraPower-probe.txt 2>/dev/null
+  cat $OUT
+}
+
+# ---------- CHARGING (deteksi node otomatis, diverifikasi lewat status baterai) ----------
+PS=/sys/class/power_supply
+BAT=$PS/battery
+bg(){ if command -v setsid >/dev/null 2>&1; then setsid sh $SELF $1 </dev/null >/dev/null 2>&1 & else nohup sh $SELF $1 </dev/null >/dev/null 2>&1 & fi; }
+plugged(){ for n in usb ac wireless; do [ "$(rd $PS/$n/online)" = 1 ] && return 0; done; return 1; }
+# Metode bypass (prompt pengguna): nol-kan node limit arus/tegangan pada perangkat power_supply ber-atribut "health".
+# Nilai asli disimpan dulu lalu dipulihkan; node tanpa nilai asli dikembalikan ke 1000000000.
+chg_dirs(){ [ -f $DIR/chgd ] || find /sys/devices -name health -exec dirname {} + 2>/dev/null > $DIR/chgd; }   # cache direktori power_supply ber-atribut "health"
+chg_scan(){
+  chg_dirs; b=$(cat $DIR/chgd 2>/dev/null); : > $DIR/chgn
+  [ -n "$b" ] && find $b -name input_voltage_limit -o -name input_current_limit -o -name voltage_max -o -name current_max -o -name constant_charge_voltage -o -name constant_charge_current 2>/dev/null > $DIR/chgn
+}
+chg_ready(){
+  [ -s $DIR/chgn ] && return 0; [ -f $DIR/nonodes ] && return 1
+  chg_scan; [ -s $DIR/chgn ] && return 0; touch $DIR/nonodes; return 1
+}
+chg_set(){ # stop|res
+  chg_ready || return 1
+  if [ "$1" = stop ]; then
+    if [ ! -f $DIR/chgsave ]; then
+      : > $DIR/chgsave
+      while read n; do v=$(rd $n); [ -n "$v" ] && [ "$v" != 0 ] && echo "$n $v" >> $DIR/chgsave; done < $DIR/chgn
+    fi
+    while read n; do w 0 $n; done < $DIR/chgn
+  else
+    [ -f $DIR/chgsave ] && while read n v; do w $v $n; done < $DIR/chgsave
+    while read n; do grep -q "^$n " $DIR/chgsave 2>/dev/null || w 1000000000 $n; done < $DIR/chgn
+    rm -f $DIR/chgsave
+  fi
+}
+# Fast Charging (metode modul fast_charging): paksa status baterai "Good" dan charge_control_limit 0,
+# supaya kondisi "warm"/limit suhu tidak menurunkan arus pengisian.
+chg_fast(){
+  chg_dirs
+  while read d; do w 0 $d/charge_control_limit; w Good $d/health; done < $DIR/chgd
+}
+chg_wd(){
+  echo $$ > $DIR/chg.pid; held=0
+  while :; do
+    lvl=$(rd $BAT/capacity); lvl=${lvl:-0}; want=res
+    if plugged; then
+      [ "$(getcfg F_bypass)" = on ] && want=stop
+      [ "$(getcfg F_gamebypass)" = on ] && [ -f $DIR/ingame ] && want=stop
+      if [ "$(getcfg F_autocut)" = on ]; then
+        cut=$(getcfg CUT); cut=${cut:-80}
+        if [ "$lvl" -ge "$cut" ]; then want=stop; elif [ "$held" = 1 ] && [ "$lvl" -gt $((cut-5)) ]; then want=stop; fi
+      fi
+    fi
+    if [ "$want" = stop ] && [ "$held" = 0 ]; then chg_set stop && held=1
+    elif [ "$want" = res ] && [ "$held" = 1 ]; then chg_set res; held=0; fi
+    [ "$want" = res ] && [ "$held" = 0 ] && [ "$(getcfg F_fastcharge)" = on ] && plugged && chg_fast
+    sleep 5
+  done
+}
+chg_sync(){
+  on=0; for f in fastcharge autocut bypass gamebypass; do [ "$(getcfg F_$f)" = on ] && on=1; done
+  alive=0; [ -f $DIR/chg.pid ] && kill -0 $(cat $DIR/chg.pid) 2>/dev/null && alive=1
+  if [ $on = 1 ] && [ $alive = 0 ]; then bg chg_wd
+  elif [ $on = 0 ] && [ $alive = 1 ]; then kill $(cat $DIR/chg.pid); rm -f $DIR/chg.pid; chg_set res; fi
+}
+
+# ---------- GAME: preload, DND otomatis, FPS ----------
+fg_pkg(){ dumpsys window 2>/dev/null | grep -m1 mCurrentFocus | sed 's/.* \([A-Za-z0-9_.]*\)\/.*/\1/'; }
+games(){ case $1 in
+  list) pm list packages -3 | sed 's/package://' | grep -v '^android\.' | sort;;
+  add) grep -qx "$2" $DIR/games.txt 2>/dev/null || echo $2 >> $DIR/games.txt;;
+  del) grep -vx "$2" $DIR/games.txt > $DIR/games.t; mv $DIR/games.t $DIR/games.txt;;
+esac; }
+preload(){ # apk/lib/oat/obb + aset non-media di Android/data/<pkg>/files -> page cache (batas ${PRELOAD_MB:-600} MB)
+  lim=$((${PRELOAD_MB:-600}*1048576)); used=0; L=$DIR/pl.$$.lst
+  { for a in $(pm path $1 | sed 's/package://'); do d=$(dirname $a); ls $a $d/lib/arm64/* $d/oat/arm64/* 2>/dev/null; done
+    ls /sdcard/Android/obb/$1/* 2>/dev/null
+    find /sdcard/Android/data/$1/files -type f 2>/dev/null | grep -Eiv '\.(mp3|ogg|wav|mp4|png|jpe?g|webp|log|txt)$'
+  } > $L
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue; sz=$(stat -c %s "$f"); [ $((used+sz)) -gt $lim ] && continue
+    nice -n 19 cat "$f" > /dev/null 2>&1; used=$((used+sz))
+  done < $L
+  rm -f $L
+}
+# Ide fitur game terinspirasi dari CMD-Tweaks (t.me/HoyoSlave); kode ditulis ulang.
+gclean(){ for p in $(pm list packages -3 | sed 's/package://'); do [ "$p" = "$1" ] || [ "$p" = $FPKG ] || cmd activity kill --user 0 $p >/dev/null 2>&1; done; }
+mode_restore(){
+  m=$(getcfg MODE); [ "$m" = auto ] && m=balance
+  if [ "$m" = custom ]; then while IFS='|' read -r k a; do [ -n "$a" ] && NOSAVE=1 sh $SELF $a; done < $CUS
+  else set_mode $m temp; fi
+}
+gp_enter(){ [ -f $DIR/prof_on ] && return; touch $DIR/prof_on
+  gm=$(getcfg GP_MODE); gh=$(getcfg GP_HZ); set_mode ${gm:-perf} temp; refresh ${gh:-120} >/dev/null
+}
+gp_leave(){ [ -f $DIR/prof_on ] || return; rm -f $DIR/prof_on; mode_restore; }
+game_wd(){
+  echo $$ > $DIR/game.pid; ing=0; dset=0; away=0
+  [ "$(getcfg F_preload)" = on ] && ( sleep 30; for p in $(cat $DIR/games.txt 2>/dev/null); do preload $p; done ) &
+  while :; do
+    cur=$(fg_pkg)
+    if [ -n "$cur" ] && grep -qx "$cur" $DIR/games.txt 2>/dev/null; then
+      away=0
+      if [ "$ing" = 0 ]; then
+        ing=1; touch $DIR/ingame
+        [ "$(getcfg F_gameclean)" = on ] && gclean $cur &
+        [ "$(getcfg F_preload)" = on ] && preload $cur &
+        [ "$(getcfg F_gameprofile)" = on ] && gp_enter
+        if [ "$(getcfg F_gamednd)" = on ]; then cmd notification set_dnd priority; dset=1; fi
+      fi
+    elif [ "$ing" = 1 ]; then
+      away=$((away+1))
+      if [ $away -ge 2 ]; then   # keluar game bila 2x cek berturut-turut (anti-flicker shade/dialog)
+        ing=0; rm -f $DIR/ingame; gp_leave
+        [ "$dset" = 1 ] && { cmd notification set_dnd off; dset=0; }
+      fi
+    fi
+    sleep 4
+  done
+}
+game_sync(){
+  on=0; for f in preload gamednd gameprofile gameclean gamebypass; do [ "$(getcfg F_$f)" = on ] && on=1; done
+  alive=0; [ -f $DIR/game.pid ] && kill -0 $(cat $DIR/game.pid) 2>/dev/null && alive=1
+  if [ $on = 1 ] && [ $alive = 0 ]; then bg game_wd
+  elif [ $on = 0 ] && [ $alive = 1 ]; then kill $(cat $DIR/game.pid); rm -f $DIR/game.pid; fi
+}
+fps_calc(){ while IFS= read -r l; do
+    dumpsys SurfaceFlinger --latency "$l" 2>/dev/null | awk 'NR>1 && NF==3 && $2>0 && $2<9e18 {t[n++]=$2; if($2>m)m=$2} END{c=0; for(i=0;i<n;i++) if(t[i]>m-1e9) c++; if(n>1) print c}'
+  done < $DIR/layers | sort -n | tail -1; }
+fps(){ # FPS aplikasi di depan (frame dalam 1 detik terakhir)
+  pkg=$(fg_pkg); [ -n "$pkg" ] || { echo "FPS|0|-"; return; }
+  dumpsys SurfaceFlinger --list 2>/dev/null | grep -F "$pkg" > $DIR/layers
+  v=$(fps_calc); echo "FPS|${v:-0}|$pkg"
+}
+# daemon: tulis "<fps>|<paket>" ke file milik app UltraFPS (app membuat file itu sendiri)
+fps_wd(){
+  echo $$ > $DIR/fps.pid; F=/data/data/$FPKG/files/fps; i=0; pkg=""
+  while :; do
+    if [ $((i%3)) = 0 ]; then
+      pkg=$(fg_pkg)
+      if [ -n "$pkg" ]; then dumpsys SurfaceFlinger --list 2>/dev/null | grep -F "$pkg" > $DIR/layers; else : > $DIR/layers; fi
+    fi
+    i=$((i+1))
+    if [ -n "$pkg" ] && [ -f $F ]; then v=$(fps_calc); echo "${v:-0}|$pkg" > $F; fi
+    sleep 1
+  done
+}
+fpsapp(){
+  case $1 in
+    install)
+      [ "$2" != force ] && [ -d /data/data/$FPKG ] && return 0
+      apk=""; for a in $MODD/apk/UltraFPS.apk /sdcard/UltraPower/UltraFPS.apk; do [ -f $a ] && { apk=$a; break; }; done
+      [ -n "$apk" ] || { echo "ERR|UltraFPS.apk tidak ditemukan"; return 1; }
+      cp $apk /data/local/tmp/ufps.apk; chmod 644 /data/local/tmp/ufps.apk
+      pm install -r /data/local/tmp/ufps.apk >/dev/null 2>&1; rm -f /data/local/tmp/ufps.apk
+      appops set $FPKG SYSTEM_ALERT_WINDOW allow; pm grant $FPKG android.permission.POST_NOTIFICATIONS 2>/dev/null
+      [ -d /data/data/$FPKG ] && echo OK || echo "ERR|Gagal memasang";;
+    start)
+      am start-foreground-service -n $FPKG/.FpsService >/dev/null 2>&1
+      sleep 2; pidof $FPKG >/dev/null 2>&1 || am start -n $FPKG/.AutoActivity >/dev/null 2>&1;;
+    stop) am stopservice -n $FPKG/.FpsService >/dev/null 2>&1;;
+  esac
+}
+fps_sync(){
+  alive=0; [ -f $DIR/fps.pid ] && kill -0 $(cat $DIR/fps.pid) 2>/dev/null && alive=1
+  if [ "$(getcfg F_fpsoverlay)" = on ]; then
+    fpsapp install >/dev/null 2>&1
+    [ $alive = 0 ] && bg fps_wd
+    fpsapp start
+  else
+    [ $alive = 1 ] && { kill $(cat $DIR/fps.pid); rm -f $DIR/fps.pid; }
+    fpsapp stop
+  fi
+}
+
+# ---------- MANUAL ----------
+cpu_gov(){ # policyN|all gov
+  for p in $CPU/policy*; do
+    [ "$1" = "all" ] || [ "$(basename $p)" = "$1" ] || continue
+    w $2 $p/scaling_governor
+  done
+  markcustom "cpu_gov_$1" "cpu_gov $1 $2"
+}
+cpu_freq(){ # policyN min max
+  p=$CPU/$1; range $p/scaling_min_freq $p/scaling_max_freq $2 $3
+  markcustom "cpu_freq_$1" "cpu_freq $1 $2 $3"
+}
+gpu_gov(){ [ -n "$GPU" ] && w $1 $GPU/governor; markcustom gpu_gov "gpu_gov $1"; }
+gpu_freq(){ [ -n "$GPU" ] && range $GPU/min_freq $GPU/max_freq $1 $2; markcustom gpu_freq "gpu_freq $1 $2"; }
+
+# ---------- STATUS (dibaca WebUI) ----------
+status(){
+  echo "MODE|$(getcfg MODE)"
+  echo "BAT|$(rd $BAT/capacity)|$(rd $BAT/status)|$(rd $BAT/current_now)|$(rd $BAT/temp)|$(rd $BAT/voltage_now)|$(chg_ready && grep -c . $DIR/chgn)|$(getcfg CUT)"
+  echo "FPSAPP|$([ -d /data/data/$FPKG ] && echo yes || echo no)"
+  echo "PROF|$([ -f $DIR/prof_on ] && echo on || echo off)"
+  echo "RATES|$(rates)"
+  echo "GPCFG|$(getcfg GP_MODE)|$(getcfg GP_HZ)"
+  echo "GAMES|$(cat $DIR/games.txt 2>/dev/null | tr '\n' ' ')"
+  echo "DEV|$(getprop ro.product.brand)|$(getprop ro.product.model)|$(soc)|$(uname -r)|$(getprop ro.build.version.release)|$(gpu_type)"
+  caps
+  echo "THERMRUN|$(n=0; for a in $(thermal_svcs); do [ "$(getprop init.svc.$a)" = running ] && n=$((n+1)); done; echo $n)"
+  for f in $FEATS; do echo "FEAT|$f|$(fstate $f)"; done
+  for p in $CPU/policy*; do
+    [ -d $p ] || continue
+    imin=$(rd $p/cpuinfo_min_freq); imax=$(rd $p/cpuinfo_max_freq)
+    fr=$(rd $p/scaling_available_frequencies); [ -z "$fr" ] && fr="$imin $imax"
+    echo "CPU|$(basename $p)|$(rd $p/scaling_governor)|$(rd $p/scaling_min_freq)|$(rd $p/scaling_max_freq)|$(rd $p/scaling_cur_freq)|$(rd $p/scaling_available_governors)|$fr|$(rd $p/related_cpus)"
+  done
+  if [ -z "$GPU" ] && [ -f $GP/gpufreq_opp_freq ]; then
+    echo "GPUP|$(gp_freqs | tr '\n' ' ')"
+  fi
+  if [ -n "$GPU" ]; then
+    echo "GPU|$GPU|$(rd $GPU/governor)|$(rd $GPU/min_freq)|$(rd $GPU/max_freq)|$(rd $GPU/cur_freq)|$(rd $GPU/available_governors)|$(rd $GPU/available_frequencies)|"
+  fi
+}
+
+boot(){
+  # Migrasi: fitur downscale game sudah dihapus. Bila dulu pernah diset, kembalikan resolusi game ke normal lalu bersihkan config.
+  g=$(getcfg GSCALE)
+  if [ -n "$g" ]; then
+    [ "$g" != 100 ] && for p in $(cat $DIR/games.txt 2>/dev/null); do cmd game reset $p >/dev/null 2>&1; done
+    grep -v '^GSCALE=' $CFG > $CFG.t; mv $CFG.t $CFG
+  fi
+  rm -f $TS.*   # sysfs/props baru saja di-reset oleh boot: buang catatan lama
+  [ "$(getcfg THERMAL)" = "off" ] && thermal off
+  for f in doze datasaver wifilatency; do v=$(getcfg F_$f); [ -n "$v" ] && feat $f $v; done
+  [ -f $DIR/guard.pid ] && kill $(cat $DIR/guard.pid) 2>/dev/null
+  rm -f $DIR/guard.pid $DIR/guard_hot $DIR/chgn $DIR/chgd $DIR/nonodes $DIR/chgsave $DIR/ingame $DIR/prof_on
+  chg_sync; game_sync
+  fpsapp install >/dev/null 2>&1; [ "$(getcfg F_fpsoverlay)" = on ] && fps_sync
+  m=$(getcfg MODE)
+  if [ "$m" = "custom" ]; then
+    while IFS='|' read -r k a; do [ -n "$a" ] && NOSAVE=1 sh $SELF $a; done < $CUS
+  else
+    [ "$m" = auto ] && m=balance
+    set_mode "$m"
+  fi
+}
+
+case "$1" in
+  mode) set_mode $2; game_sync;;
+  thermal) thermal $2;;
+  thermal_check) for a in $(thermal_svcs); do echo "$a $(getprop init.svc.$a)"; done;;
+  feat) feat $2 $3;;
+  cpu_gov) cpu_gov $2 $3;;
+  cpu_freq) cpu_freq $2 $3 $4;;
+  refresh) refresh $2;;
+  gpu_fix) gpu_fix $2;;
+  gpu_gov) gpu_gov $2;;
+  gpu_freq) gpu_freq $2 $3;;
+  status) status;;
+  cut) setcfg CUT $2;;
+  games) games $2 $3;;
+  fps) fps;;
+  gp_cfg) setcfg GP_$(echo $2 | tr a-z A-Z) $3;;
+  fpsapp) fpsapp $2 $3;;
+  fps_wd) fps_wd;;
+  chg_wd) chg_wd;;
+  game_wd) game_wd;;
+  probe) probe;;
+  boot) boot;;
+  *) echo "usage: ultrapower {mode perf|balance|eco | thermal on|off | feat <nama> on|off | refresh 60|90|120 | gpu_fix <kHz|0> | cpu_gov <policyN|all> <gov> | cpu_freq <policyN> <min> <max> | gpu_gov <gov> | gpu_freq <min> <max> | status}";;
+esac
