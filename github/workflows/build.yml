@@ -1,0 +1,40 @@
+name: Build UltraFPS dan UltraPower
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Masukkan APK ke module dan zip ulang
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk module/apk/UltraFPS.apk
+          cp app/build/outputs/apk/debug/app-debug.apk UltraFPS.apk
+          cd module
+          zip -r ../UltraPower-v2.2-FPS.zip .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UltraPower-Module
+          path: UltraPower-v2.2-FPS.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UltraFPS-APK
+          path: UltraFPS.apk
